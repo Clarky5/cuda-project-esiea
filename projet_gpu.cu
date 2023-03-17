@@ -1,9 +1,9 @@
+
 %%cu
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <curand_kernel.h>
 #include <time.h>
 
 
@@ -28,10 +28,10 @@ static void HandleError( cudaError_t err, const char *file,int line )
 
 
 //Taille du tableau
-#define SIZE_ARRAY 500
+#define SIZE_ARRAY 400
 
 //Fonction C du tri par insertion qui a été pris sur le site https://www.geeksforgeeks.org/insertion-sort/
-void insertionSort(int arr[], int n)
+void insertionSortCPU(int arr[], int n)
 {
     int i, key, j;
     for (i = 1; i < n; i++) {
@@ -48,7 +48,7 @@ void insertionSort(int arr[], int n)
 
 //Fonction sur le gpu 
 
-__global__ void tri_insertion_gpu(int *arr, int sizeArray) 
+__global__ void tri_insertionGPU(int arr[], int sizeArray) 
 {
    int tid = blockIdx.x * blockDim.x + threadIdx.x;
  
@@ -65,6 +65,7 @@ __global__ void tri_insertion_gpu(int *arr, int sizeArray)
                 j = j - 1;
             }
             arr[j + 1] = key;
+            tid += blockIdx.x * blockDim.x;
         }
     }
 }
@@ -74,29 +75,7 @@ __global__ void tri_insertion_gpu(int *arr, int sizeArray)
 
 
 
-//Fonction remplissage sur le gpu
-//On remplit le tableau directement depuis le GPU au lieu de le remplir 
-__global__ void mixArray(int *a, curandState *state)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j, tmp;
-    curand_init(clock64(), i, 0, &state[i]);
 
-    if (i < SIZE_ARRAY) {
-        a[i] = i * 2;
-        
-    }
-
-    __syncthreads();
-
-    for (i = SIZE_ARRAY - 1; i > 0; i--)
-    {
-        j = curand(&state[threadIdx.x]) % (i + 1);
-        tmp = a[i];
-        a[i] = a[j];
-        a[j] = tmp;
-    }
-}
 
 
 int main(void)
@@ -113,20 +92,17 @@ int main(void)
    
 
 
-    int a[SIZE_ARRAY],b[SIZE_ARRAY];
+    int a[SIZE_ARRAY];
   
     int *dev_a;
  
     int i, j, tmp;
  
   
+    //Evenement Cuda pour mesurer le temps d'exécution d'une fonction kernel
     cudaEvent_t start, stop;
-    float elapsed_time;
- 
-     // Allocation de mémoire pour les états CURAND. Utile pour générer des nombres aléatoires.
-    curandState *dev_states;
-    HANDLE_ERROR(cudaMalloc(&dev_states, SIZE_ARRAY * sizeof(curandState)));
-
+    float gpu_time_used_ms;
+    
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
@@ -142,19 +118,21 @@ int main(void)
     //allocation de la mémoire sur le GPU
     HANDLE_ERROR( cudaMalloc ( (void**)&dev_a, SIZE_ARRAY * sizeof(int) ) );
  
-    printf("\nAffichage du tableau  avant le tri : \n");
+    printf("\nAffichage du tableau  avant le tri (tableau mélangé): \n");
  
+    
     // Remplissage du tableau 
     for (i = 0; i < SIZE_ARRAY; i++) {
-        a[i] = i * 2;
-        b[i] = i * 2;
+        a[i] = i*2;
     }
- 
+    
+
+    
 
       // Mélange du tableau a
-    for (i = SIZE_ARRAY - 1; i > 0; i--) 
+    for (i = 0; i < SIZE_ARRAY; i++) 
     {
-        j = rand() % (i + 1);
+        j = rand() % SIZE_ARRAY;
         tmp = a[i];
         a[i] = a[j];
         a[j] = tmp;
@@ -166,35 +144,24 @@ int main(void)
         printf("Index n° %d --> %d\n.",i,a[i]);
     }
     
-    // Mélange du tableau b
-    for (i = SIZE_ARRAY - 1; i > 0; i--) 
-    {
-        j = rand() % (i + 1);
-        tmp = b[i];
-        b[i] = b[j];
-        b[j] = tmp;
-    }
- 
+   
 
-
-
-
-
+    //On recopie le tableau du host vers le gpu
     HANDLE_ERROR( cudaMemcpy(dev_a, a, SIZE_ARRAY* sizeof(int), cudaMemcpyHostToDevice ) );
  
 
     
 
  
-    tri_insertion_gpu<<<nThreads,nBlocks>>>(dev_a, SIZE_ARRAY); //WARM-UP. Cela permet de réduire le temps d'exécution de la fonction lorsque celle-ci est à nouveau mesuré.
+    tri_insertionGPU<<<nThreads,nBlocks>>>(dev_a, SIZE_ARRAY); //WARM-UP. Cela permet de réduire le temps d'exécution du kernel lorsque celle-ci est à nouveau mesuré.
  
     
     cudaEventRecord(start, 0);
-    tri_insertion_gpu<<<nThreads,nBlocks>>>(dev_a, SIZE_ARRAY);
+    tri_insertionGPU<<<nThreads,nBlocks>>>(dev_a, SIZE_ARRAY);
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
 
-    cudaEventElapsedTime(&elapsed_time, start, stop);
+    cudaEventElapsedTime(&gpu_time_used_ms, start, stop);
  
 
 
@@ -202,7 +169,7 @@ int main(void)
    double cpu_time_used_ms;
 
     cpu_start = clock();
-    insertionSort(a,SIZE_ARRAY);
+    insertionSortCPU(a,SIZE_ARRAY);
     cpu_end = clock();
 
     cpu_time_used_ms = ((double) (cpu_end - cpu_start)) / CLOCKS_PER_SEC * 1000;
@@ -210,16 +177,25 @@ int main(void)
     
 
 
-    insertionSort(a,SIZE_ARRAY);
+    
+ 
+     printf("\n Affichage du tableau après le tri (CPU) : \n");
+ 
+    
+    for(int i = 0; i < SIZE_ARRAY; i++)
+    {
+        
+        printf("Index n° %d --> %d\n.",i,a[i]);
+    }
 
-
+    //On recopie le tableau du gpu vers le host
     HANDLE_ERROR( cudaMemcpy( a, dev_a, SIZE_ARRAY* sizeof(int), cudaMemcpyDeviceToHost ) );
  
   
   
 
  
-    printf("\n Affichage du tableau après le tri : \n");
+    printf("\n Affichage du tableau après le tri (GPU) : \n");
  
     
     for(int i = 0; i < SIZE_ARRAY; i++)
@@ -230,10 +206,11 @@ int main(void)
 
     
   printf("Temps d'execution CPU: %f ms\n", cpu_time_used_ms);
-  printf("Temps d'execution GPU: %f ms\n", elapsed_time);
+  printf("Temps d'execution GPU: %f ms\n", gpu_time_used_ms);
   
   
   
+  //Synchronisation du kernel avec le CPU
   cudaDeviceSynchronize();
 
   //Libération de la mémoire allouée sur le GPU
